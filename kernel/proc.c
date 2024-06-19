@@ -283,11 +283,12 @@ fork(void)
   struct proc *np;
   struct proc *p = myproc();
 
+
   // Allocate process.
   if((np = allocproc()) == 0){
     return -1;
   }
-
+  np->tracemask=p->tracemask;
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     freeproc(np);
@@ -685,4 +686,18 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+
+}
+uint64 getprocnum(void)
+{
+  uint64 num=0;
+  struct proc* p;
+  for(p=proc;p!=&proc[NPROC];p++)
+  {
+    if(p->state!=UNUSED)
+    {
+      num++;
+    }
+  }
+  return num;
 }
