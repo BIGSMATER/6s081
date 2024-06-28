@@ -4,6 +4,7 @@
         "*.py": "python",
         "types.h": "c",
         "stat.h": "c",
-        "user.h": "c"
+        "user.h": "c",
+        "defs.h": "c"
     }
 }

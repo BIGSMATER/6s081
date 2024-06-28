@@ -5,6 +5,13 @@
 
 -include conf/lab.mk
 
+
+# To compile and run with a lab solution, set the lab name in conf/lab.mk
+# (e.g., LAB=util).  Run make grade to test solution with the lab's
+# grade script (e.g., grade-lab-util).
+
+-include conf/lab.mk
+
 K=kernel
 U=user
 
@@ -31,6 +38,34 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o
+
+OBJS_KCSAN = \
+  $K/start.o \
+  $K/console.o \
+  $K/printf.o \
+  $K/uart.o \
+  $K/spinlock.o
+
+ifdef KCSAN
+OBJS_KCSAN += \
+	$K/kcsan.o
+endif
+
+ifeq ($(LAB),$(filter $(LAB), lock))
+OBJS += \
+	$K/stats.o\
+	$K/sprintf.o
+endif
+
+
+ifeq ($(LAB),net)
+OBJS += \
+	$K/e1000.o \
+	$K/net.o \
+	$K/sysnet.o \
+	$K/pci.o
+endif
+
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -94,11 +129,27 @@ XCFLAGS += -DSOL_$(LABUPPER) -DLAB_$(LABUPPER)
 endif
 
 CFLAGS += $(XCFLAGS)
+
+ifdef LAB
+LABUPPER = $(shell echo $(LAB) | tr a-z A-Z)
+XCFLAGS += -DSOL_$(LABUPPER) -DLAB_$(LABUPPER)
+endif
+
+CFLAGS += $(XCFLAGS)
 CFLAGS += -MD
 CFLAGS += -mcmodel=medany
 CFLAGS += -ffreestanding -fno-common -nostdlib -mno-relax
 CFLAGS += -I.
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
+
+ifeq ($(LAB),net)
+CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
+endif
+
+ifdef KCSAN
+CFLAGS += -DKCSAN
+KCSANFLAG = -fsanitize=thread -fno-inline
+endif
 
 ifeq ($(LAB),net)
 CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
@@ -121,8 +172,16 @@ LDFLAGS = -z max-page-size=4096
 
 $K/kernel: $(OBJS) $(OBJS_KCSAN) $K/kernel.ld $U/initcode
 	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) $(OBJS_KCSAN)
+$K/kernel: $(OBJS) $(OBJS_KCSAN) $K/kernel.ld $U/initcode
+	$(LD) $(LDFLAGS) -T $K/kernel.ld -o $K/kernel $(OBJS) $(OBJS_KCSAN)
 	$(OBJDUMP) -S $K/kernel > $K/kernel.asm
 	$(OBJDUMP) -t $K/kernel | sed '1,/SYMBOL TABLE/d; s/ .* / /; /^$$/d' > $K/kernel.sym
+
+$(OBJS): EXTRAFLAG := $(KCSANFLAG)
+
+$K/%.o: $K/%.c
+	$(CC) $(CFLAGS) $(EXTRAFLAG) -c -o $@ $<
+
 
 $(OBJS): EXTRAFLAG := $(KCSANFLAG)
 
@@ -140,6 +199,10 @@ tags: $(OBJS) _init
 	etags *.S *.c
 
 ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
+
+ifeq ($(LAB),$(filter $(LAB), lock))
+ULIB += $U/statistics.o
+endif
 
 ifeq ($(LAB),$(filter $(LAB), lock))
 ULIB += $U/statistics.o
@@ -163,6 +226,7 @@ $U/_forktest: $U/forktest.o $(ULIB)
 	$(OBJDUMP) -S $U/_forktest > $U/forktest.asm
 
 mkfs/mkfs: mkfs/mkfs.c $K/fs.h $K/param.h
+	gcc $(XCFLAGS) -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 	gcc $(XCFLAGS) -Werror -Wall -I. -o mkfs/mkfs mkfs/mkfs.c
 
 # Prevent deletion of intermediate files, e.g. cat.o, after first build, so
@@ -277,6 +341,9 @@ clean:
 	$(UPROGS) \
 	*.zip \
 	ph barrier
+	$(UPROGS) \
+	*.zip \
+	ph barrier
 
 # try to generate a unique GDB port
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)
@@ -287,6 +354,11 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 ifndef CPUS
 CPUS := 3
 endif
+ifeq ($(LAB),fs)
+CPUS := 1
+endif
+
+FWDPORT = $(shell expr `id -u` % 5000 + 25999)
 ifeq ($(LAB),fs)
 CPUS := 1
 endif
@@ -303,6 +375,11 @@ QEMUOPTS += -netdev user,id=net0,hostfwd=udp::$(FWDPORT)-:2000 -object filter-du
 QEMUOPTS += -device e1000,netdev=net0,bus=pcie.0
 endif
 
+ifeq ($(LAB),net)
+QEMUOPTS += -netdev user,id=net0,hostfwd=udp::$(FWDPORT)-:2000 -object filter-dump,id=net0,netdev=net0,file=packets.pcap
+QEMUOPTS += -device e1000,netdev=net0,bus=pcie.0
+endif
+
 qemu: $K/kernel fs.img
 	$(QEMU) $(QEMUOPTS)
 
@@ -313,6 +390,64 @@ qemu-gdb: $K/kernel .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 
+ifeq ($(LAB),net)
+# try to generate a unique port for the echo server
+SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
+
+server:
+	python3 server.py $(SERVERPORT)
+
+ping:
+	python3 ping.py $(FWDPORT)
+endif
+
+##
+##  FOR testing lab grading script
+##
+
+ifneq ($(V),@)
+GRADEFLAGS += -v
+endif
+
+print-gdbport:
+	@echo $(GDBPORT)
+
+grade:
+	@echo $(MAKE) clean
+	@$(MAKE) clean || \
+          (echo "'make clean' failed.  HINT: Do you have another running instance of xv6?" && exit 1)
+	./grade-lab-$(LAB) $(GRADEFLAGS)
+
+##
+## FOR submissions
+##
+
+submit-check:
+	@if ! test -d .git; then \
+		echo No .git directory, is this a git repository?; \
+		false; \
+	fi
+	@if test "$$(git symbolic-ref HEAD)" != refs/heads/$(LAB); then \
+		git branch; \
+		read -p "You are not on the $(LAB) branch.  Hand-in the current branch? [y/N] " r; \
+		test "$$r" = y; \
+	fi
+	@if ! git diff-files --quiet || ! git diff-index --quiet --cached HEAD; then \
+		git status -s; \
+		echo; \
+		echo "You have uncomitted changes.  Please commit or stash them."; \
+		false; \
+	fi
+	@if test -n "`git status -s`"; then \
+		git status -s; \
+		read -p "Untracked files will not be handed in.  Continue? [y/N] " r; \
+		test "$$r" = y; \
+	fi
+
+zipball: clean submit-check
+	git archive --verbose --format zip --output lab.zip HEAD
+
+.PHONY: zipball clean grade submit-check
 ifeq ($(LAB),net)
 # try to generate a unique port for the echo server
 SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
