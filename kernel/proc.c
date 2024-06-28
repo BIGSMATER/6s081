@@ -150,7 +150,10 @@ found:
   p->interval = 0;
   p->handler = 0;
   p->ticks = 0;
-
+  if((p->pretrapframe = (struct trapframe *)kalloc()) == 0){
+    release(&p->lock);
+	return 0;
+  }
   return p;
 }
 
