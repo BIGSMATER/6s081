@@ -65,7 +65,17 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
+  }
+  else if(r_scause() == 15)
+  {
+    uint64 fault_va = r_stval();
+    if(fault_va > p->sz ||
+       is_cowpage(p->pagetable, fault_va) < 0 ||
+       cow_alloc(p->pagetable, PGROUNDDOWN(fault_va)) == 0
+    )
+    p->killed = 1;
+  } 
+  else if((which_dev = devintr()) != 0){
     // ok
   } else {
     printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
@@ -218,4 +228,58 @@ devintr()
     return 0;
   }
 }
+//myadd
+/* It is cowpage? */
+/* if YES return 0; else return -1 */
+int is_cowpage(pagetable_t pagetable, uint64 va) 
+{
+  pte_t* pte = walk(pagetable, va, 0);
+  return (*pte & PTE_COW ? 0 : -1);
+}
 
+/* allocte a phycial memory page for a cow page */
+/* if OK return memory pointer of void*; else return 0 */
+void* cow_alloc(pagetable_t pagetable, uint64 va)
+{
+  pte_t *pte = walk(pagetable, va, 0);
+  uint64 pa = PTE2PA(*pte);
+
+  // refcount == 1, only a process use the cowpage
+  // so we set the PTE_W of cowpage and clear PTE_COW of the cowpage
+  if(get_refcount(pa) == 1){
+    *pte |= PTE_W;
+    *pte &= ~PTE_COW;
+    return (void*)pa;
+  }
+
+  // refcount >= 2, some processes use the cowpage
+  uint flags;
+  char *new_mem;
+  /* sets PTE_W */
+  *pte |= PTE_W;
+  flags = PTE_FLAGS(*pte);
+  
+  /* alloc and copy, then map */
+  pa = PTE2PA(*pte);
+  new_mem = kalloc();
+
+  // If a COW page fault occurs and there's no free memory, the process should be killed.
+  if(new_mem == 0)
+    return 0;
+
+  memmove(new_mem, (char*)pa, PGSIZE);
+  /* clear PTE_V before map the page to avoid panic of 'remap'  */
+  *pte &= ~PTE_V;
+  /* note: new_mem is new address of phycial memory*/
+  if(mappages(pagetable, va, PGSIZE, (uint64)new_mem, flags) != 0){
+    /* set PTE_V, then kfree new_men, if map failed*/
+    *pte |= PTE_V;
+    kfree(new_mem);
+    return 0;
+  }
+
+  /* decrement a ref_count */
+  kfree((char*)PGROUNDDOWN(pa));
+
+  return new_mem;
+}
